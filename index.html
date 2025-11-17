@@ -1,16 +1,222 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>GHI Viewer NOA</title>
-  <link href="https://unpkg.com/maplibre-gl/dist/maplibre-gl.css" rel="stylesheet" />
-</head>
-<body>
-  <div id="map" style="height: 60vh;"></div>
-  <div id="chart" style="height: 40vh;"></div>
+<meta charset="utf-8" />
+<title>Mapa GHI Promedio</title>
 
-  <script src="https://unpkg.com/maplibre-gl/dist/maplibre-gl.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/zarr@0.4.0/dist/zarr.umd.js"></script>
-  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
-  <script src="js/app.js"></script>
+<!-- Leaflet -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<style>
+    body { margin: 0; }
+
+    #map {
+        width: 100vw;
+        height: 100vh;
+        z-index: 1; /* IMPORTANTE */
+    }
+
+    .info-panel {
+        position: fixed;
+        top: 15px;
+        left: 15px;
+        background: rgba(255,255,255,0.9);
+        padding: 12px;
+        border-radius: 10px;
+        font-family: sans-serif;
+        width: 240px;
+        box-shadow: 0 0 10px rgba(0,0,0,0.3);
+        z-index: 9999; /* 🔥 SIEMPRE visible */
+    }
+
+    .info-title {
+        font-weight: bold;
+        margin-bottom: 5px;
+    }
+
+    .value-box {
+        position: fixed;
+        top: 15px;
+        right: 15px;
+        background: rgba(255,255,255,0.85);
+        padding: 10px;
+        border-radius: 10px;
+        font-family: sans-serif;
+        box-shadow: 0 0 10px rgba(0,0,0,0.3);
+        min-width: 140px;
+        text-align: left;
+        z-index: 9999; /* 🔥 SIEMPRE visible */
+    }
+
+    .color-bar {
+        width: 100%;
+        height: 20px;
+        margin-top: 4px;
+        background: linear-gradient(to right,
+            #fff5eb,
+            #fee6ce,
+            #fdd0a2,
+            #fdae6b,
+            #fd8d3c,
+            #f16913,
+            #d94801,
+            #8c2d04
+        );
+        border-radius: 5px;
+    }
+
+    .color-labels {
+        display: flex;
+        justify-content: space-between;
+        font-size: 11px;
+        margin-top: 4px;
+    }
+</style>
+</head>
+
+<body>
+
+<div id="map"></div>
+
+<!-- Panel lateral -->
+<div class="info-panel">
+    <div class="info-title">Escala de colores (GHI)</div>
+    <div class="color-bar"></div>
+    <div class="color-labels">
+        <span>Bajo</span><span>Alto</span>
+    </div>
+</div>
+
+<!-- Caja derecha -->
+<div id="valueBox" class="value-box">Haga clic en el mapa</div>
+
+<script>
+
+// ------------------------------------------------------------
+// 1) Inicializar mapa con límites
+// ------------------------------------------------------------
+const southWest = L.latLng(-30, -70);
+const northEast = L.latLng(-20, -60);
+const bounds = L.latLngBounds(southWest, northEast);
+
+var map = L.map('map', {
+    maxBounds: bounds,
+    maxBoundsViscosity: 1.0
+}).setView([-25, -65], 6);
+
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 14,
+    minZoom: 5
+}).addTo(map);
+
+let dataGrid, lats, lons, nLat, nLon;
+
+// ------------------------------------------------------------
+// 2) Cargar JSON
+// ------------------------------------------------------------
+fetch("GHI_promedio.json")
+    .then(r => r.json())
+    .then(json => {
+
+        lats = json.lat;
+        lons = json.lon;
+        dataGrid = json.GHI_promedio;
+
+        nLat = lats.length;
+        nLon = lons.length;
+
+        // Crear canvas
+        let canvas = document.createElement("canvas");
+        canvas.width = nLon;
+        canvas.height = nLat;
+        let ctx = canvas.getContext("2d");
+        let img = ctx.createImageData(nLon, nLat);
+
+        let all = dataGrid.flat();
+        let min = Math.min(...all);
+        let max = Math.max(...all);
+
+        function scale(v) {
+            return (v - min) / (max - min);
+        }
+
+        function oranges(t) {
+            const r = Math.floor(255 * (0.9 * t + 0.1));
+            const g = Math.floor(165 * (0.8 * t + 0.2));
+            const b = 0;
+            return [r, g, b];
+        }
+
+        // Rellenar canvas
+        for (let i = 0; i < nLat; i++) {
+            for (let j = 0; j < nLon; j++) {
+                let t = scale(dataGrid[i][j]);
+                let [r,g,b] = oranges(t);
+
+                let idx = (i * nLon + j) * 4;
+                img.data[idx]     = r;
+                img.data[idx + 1] = g;
+                img.data[idx + 2] = b;
+                img.data[idx + 3] = 255;
+            }
+        }
+
+        ctx.putImageData(img, 0, 0);
+        let imageUrl = canvas.toDataURL();
+
+        // Overlay del raster
+        L.imageOverlay(imageUrl, bounds, {opacity: 0.8}).addTo(map);
+
+        // Marcador único
+        let clickMarker = null;
+
+        map.on("click", function(e) {
+
+            let lat = e.latlng.lat;
+            let lon = e.latlng.lng;
+
+            let i = closestIndex(lats, lat);
+            let j = closestIndex(lons, lon);
+
+            let v = dataGrid[i][j];
+
+            // Mostrar valor
+            document.getElementById("valueBox").innerHTML =
+                `Lat: ${lat.toFixed(3)}<br>
+                 Lon: ${lon.toFixed(3)}<br>
+                 <b>GHI: ${v.toFixed(2)} W/m²</b>`;
+
+            // Mover marcador
+            if (clickMarker) map.removeLayer(clickMarker);
+
+            clickMarker = L.circleMarker([lat, lon], {
+                radius: 7,
+                weight: 2,
+                color: "#000",
+                fillColor: "#ff6600",
+                fillOpacity: 0.9
+            }).addTo(map);
+        });
+
+    });
+
+// ------------------------------------------------------------
+// Índice más cercano
+// ------------------------------------------------------------
+function closestIndex(arr, val) {
+    let best = 0, bestD = Math.abs(arr[0] - val);
+    for (let i = 1; i < arr.length; i++) {
+        let d = Math.abs(arr[i] - val);
+        if (d < bestD) {
+            best = i;
+            bestD = d;
+        }
+    }
+    return best;
+}
+
+</script>
+
 </body>
 </html>
